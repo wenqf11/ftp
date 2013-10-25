@@ -1,19 +1,20 @@
 //fuser 21/tcp -k
+#include "server.h"
+#include "transfer.h"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 #include <unistd.h>
-#include "server.h"
 
 
 int main(void)
 {
   add_default_user();
-  struct sockaddr_in server;
   struct sockaddr_in client;
   socklen_t sin_size = sizeof(struct sockaddr_in);
 
@@ -39,7 +40,6 @@ int main(void)
   server.sin_port = htons(SERVER_PORT);
   server.sin_addr.s_addr = INADDR_ANY;
 
-
   int on = 1;
   if(setsockopt(serverFD, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(int))==-1)
   {
@@ -50,7 +50,7 @@ int main(void)
   */
   if(-1 == bind(serverFD,(const struct sockaddr *)&server, sizeof(struct sockaddr_in)))
   {
-    perror("error bind failed\n");
+    perror("error bind failed!\n");
     close(serverFD);
     exit(EXIT_FAILURE);
   }
@@ -59,7 +59,7 @@ int main(void)
   */
   if(-1 == listen(serverFD, 10))
   {
-    perror("error listen failed\n");
+    perror("error listen failed!\n");
     close(serverFD);
     exit(EXIT_FAILURE);
   }
@@ -73,7 +73,7 @@ int main(void)
 
     if(clientFD < 0)
     {
-       perror("error accept failed\n");
+       perror("error accept failed!\n");
        close(serverFD);
        exit(EXIT_FAILURE);
     }
@@ -87,54 +87,55 @@ int main(void)
 	  }
     else if (pid == 0)
     {
-	    handle_client_request(clientFD);
-      close(serverFD);
+	   handle_client_request(clientFD, client);
     }
   }
-  close(serverFD);
   return 0;
 }
 
-void handle_client_request(int clientFD)
+void handle_client_request(int clientFD,struct sockaddr_in client)
 {
   int login_flag;     //   logged in or not
   login_flag = login(clientFD);
-  while(receive_client_msg(clientFD)&&login_flag==1)
+  while(receive_client_msg(clientFD))
   {
-    if(strncmp("QUIT ", msg_buf, 5)==0)
+    if(login_flag>0&&strncmp("QUIT", msg_buf, 4)==0)
     {
       send_client_msg(clientFD, serverMsg221, strlen(serverMsg221));
+      close(clientFD);
       break;
     }
-    else if(strncmp("PASV", client_Control_Info, 4)== 0)
+    else if(strncmp("PASV", msg_buf, 4)== 0)
     {
-      handle_pasv(client_sock,client);
+      do_pasv(clientFD, client);
     }
-    else if(strncmp("PORT", client_Control_Info, 4)== 0)
+    else if(strncmp("PORT ", msg_buf, 5)== 0)
     {
-      handle_pasv(client_sock,client);
+      do_port(clientFD);
     }
-    else if(strncmp("TYPE", client_Control_Info, 4)== 0)
+    else if(strncmp("TYPE", msg_buf, 4)== 0)
     {
-      if(strncmp("TYPE I", client_Control_Info, 6) == 0)
+      if(strncmp("TYPE I", msg_buf,6) == 0)
       {
-        translate_data_mode=FILE_TRANS_MODE_BIN;
+        send_client_msg(clientFD, TYPE_I_SUCCESS, strlen(TYPE_I_SUCCESS));
       }
-      send_client_msg(client_sock, serverInfo200, strlen(serverInfo200));
+      else
+      {
+      	send_client_msg(clientFD, serverMsg202, strlen(serverMsg202));
+      }
     }
-    else if(strncmp("RETR", client_Control_Info, 4)== 0)
+    else if(strncmp("RETR ", msg_buf, 5)== 0)
     {
-      handle_file(client_sock);
-      send_client_msg(client_sock,serverInfo226, strlen(serverInfo226));
+      do_retr(clientFD);
     }
-    else if(strncmp("STOR", client_Control_Info, 4)== 0)
+    else if(strncmp("STOR ", msg_buf, 5)== 0)
     {
-      handle_file(client_sock);
-      send_client_msg(client_sock,serverInfo226, strlen(serverInfo226));
+      //handle_file(clientFD);
+      send_client_msg(clientFD,serverMsg226, strlen(serverMsg226));
     }
-    else if(strncmp("SYST", client_Control_Info, 4) == 0)
+    else if(strncmp("SYST", msg_buf, 5) == 0)
     {
-        send_client_info(client_sock, serverInfo215, strlen(serverInfo215));
+        send_client_msg(clientFD, serverMsg215, strlen(serverMsg215));
     }
     else if(strncmp("PWD ",msg_buf, 4) == 0)
     {
@@ -143,10 +144,9 @@ void handle_client_request(int clientFD)
       snprintf(pwd_info, MAX_BUF, "257 \"%s\" is current location.\r\n", getcwd(tmp_dir, MAX_BUF));
       send_client_msg(clientFD, pwd_info, strlen(pwd_info));
     }
-    else if(strncmp("CLOSE ",msg_buf, 6) == 0)
+    else if(strncmp("ABOR ",msg_buf, 5) == 0)
     {
-      printf("Client Quit!\n");
-      shutdown(clientFD, SHUT_WR);  
+      close(clientFD);
     }
   }
 }
@@ -174,8 +174,8 @@ int login(int clientFD)
   */
   int anonymous;             // anonymous user or not
   int length = strlen(msg_buf);
-  char username[MAX_BUF];
-  char password[MAX_BUF];
+  char username[MAX_BUF]={0};
+  char password[MAX_BUF]={0};
 
   int i;
   for(i=5; i<length; i++)
@@ -222,8 +222,8 @@ int login(int clientFD)
       password[i-5] = msg_buf[i];
     }
     password[i-6] = '\0';
+    printf("client %d logged in, username:%s password:%s\n",getpid(),username,password);
     send_client_msg(clientFD, serverMsg230, strlen(serverMsg230));
-    printf("client %d logged in, username:%s password:%s",getpid(),username,password);
     return 1;
   }
   else      //cNon-anonymous user
@@ -263,9 +263,9 @@ int login(int clientFD)
 
 
     if(flag == 1)  
-    {
+    {	
+      printf("client %d logged in, username:%s password:%s\n",getpid(),username,password); 	
       send_client_msg(clientFD, serverMsg230, strlen(serverMsg230));
-      printf("client %d logged in, username:%s password:%s",getpid(),username,password);
       return 2;
     }
     else
@@ -282,14 +282,16 @@ int send_client_msg(int clientFD,char* msg,int length)
   if(write(clientFD, msg, length)<0)
   {
 	  perror("error send message to client\n");
+	  return 1;
   }
   return 0;
 }
 
 int receive_client_msg(int clientFD)
 {
+	memset(msg_buf, 0, sizeof(msg_buf));
 	int ret = read(clientFD, msg_buf, MAX_BUF);
-	if (ret == 0)   //客户端关闭了
+	if (ret == 0)   //client closed
 	{
 		printf("client closed");
 		return 0;
@@ -321,4 +323,99 @@ void add_default_user()
     strcpy(default_pwd[i], password);
   }
   fclose(fp);
+}
+
+void do_pasv(int clientFD, struct sockaddr_in client)
+{
+  int data_transfer_sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (data_transfer_sock < 0)
+  {
+      printf("error create data socket!\n");
+    return;
+  }
+
+  srand((int)time(0));
+  int port = rand()  + 20000;
+
+  memset(&data_transfer_addr, 0, sizeof(struct sockaddr_in));
+  data_transfer_addr.sin_family = AF_INET;
+  data_transfer_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  data_transfer_addr.sin_port = htons(port);    
+
+  if (bind(data_transfer_sock, (struct sockaddr*)&data_transfer_addr, sizeof(struct sockaddr)) < 0)
+  {
+    printf("error bind data socket!\n");
+    return;
+  }
+  listen(data_transfer_sock, 10);
+
+  char pasv_msg[MAX_BUF];
+  char port_str[8];
+  char addr_info_str[30];
+  int port1 = ntohs(data_transfer_addr.sin_port) / 256;
+  int port2 = ntohs(data_transfer_addr.sin_port) % 256;
+  long ip = inet_addr(inet_ntoa(client.sin_addr));  //get server's ip
+                                              
+  snprintf(addr_info_str, sizeof(addr_info_str), "%ld,%ld,%ld,%ld,", ip&0xff,ip>>8&0xff,ip>>16&0xff,ip>>24&0xff);
+  snprintf(port_str, sizeof(port_str), "%d,%d", port1, port2);
+  strcat(addr_info_str, port_str);
+  snprintf(pasv_msg, MAX_BUF, "227 Entering Passive Mode (%s).\r\n", addr_info_str);
+  send_client_msg(clientFD, pasv_msg, strlen(pasv_msg));
+}
+
+void get_ip(char *buffer,char *ip_address,int *port)
+{
+  char *p, *q, *r;
+  int i;
+  char port1[6] = {0};
+  char port2[6] = {0};
+  r = strchr(buffer, ' ') + 1;
+  p = r;
+  for (i = 0; i < 4; i++)
+  {
+    p = strchr(p,',');
+    *p = '.';
+  }
+  *p = '\0';
+  strcpy(ip_address, r);
+  p = p + 1;
+  if((q = strchr(p, ',')) != NULL)
+  {
+    *q = '\0';
+    strcpy(port1, p);
+    q = q + 1;
+    strcpy(port2, q);
+  }
+  *port = atoi(port1) * 256 + atoi(port2);
+} 
+  
+void do_port(int clientFD)
+{
+  int data_transfer_sock = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in client_data_addr;
+  char ip[32]={0};
+  int  port=0;
+  get_ip(msg_buf, ip, &port);
+
+  memset(&client_data_addr, 0, sizeof(struct sockaddr_in));
+  client_data_addr.sin_family = AF_INET;
+  client_data_addr.sin_port = htons(port);
+  int res = inet_pton(AF_INET, ip, &client_data_addr.sin_addr);
+
+  if (res == 0)
+  {
+    perror("not a valid ipaddress!\n");
+    close(data_transfer_sock);
+    exit(EXIT_FAILURE);
+  }
+  
+  if (-1 == connect(data_transfer_sock, (const struct sockaddr *)&client_data_addr, sizeof(struct sockaddr_in)))
+  {
+    perror("error data socket connect to client failed!\n");
+    close(data_transfer_sock);
+    exit(EXIT_FAILURE);
+  }
+
+  ftp_data_sock = data_transfer_sock;
+  send_client_msg(clientFD, PORT_SUCCESS, strlen(PORT_SUCCESS));
 }
