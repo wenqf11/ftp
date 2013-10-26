@@ -1,12 +1,13 @@
 //fuser 21/tcp -k
 #include "server.h"
-#include "transfer.h"
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <stdio.h>
+#include <fcntl.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <time.h>
 #include <string.h>
 #include <unistd.h>
@@ -14,7 +15,7 @@
 
 int main(void)
 {
-  add_default_user();
+  init();
   struct sockaddr_in client;
   socklen_t sin_size = sizeof(struct sockaddr_in);
 
@@ -99,21 +100,22 @@ void handle_client_request(int clientFD,struct sockaddr_in client)
   login_flag = login(clientFD);
   while(receive_client_msg(clientFD))
   {
-    if(login_flag>0&&strncmp("QUIT", msg_buf, 4)==0)
+    if(strncmp("QUIT", msg_buf, 4)==0)
     {
       send_client_msg(clientFD, serverMsg221, strlen(serverMsg221));
       close(clientFD);
-      break;
+      close(ftp_data_sock);
+      exit(0);
     }
-    else if(strncmp("PASV", msg_buf, 4)== 0)
+    else if(login_flag > 0 &&strncmp("PASV", msg_buf, 4)== 0)
     {
       do_pasv(clientFD, client);
     }
-    else if(strncmp("PORT ", msg_buf, 5)== 0)
+    else if(login_flag > 0 && strncmp("PORT ", msg_buf, 5)== 0)
     {
       do_port(clientFD);
     }
-    else if(strncmp("TYPE", msg_buf, 4)== 0)
+    else if(login_flag > 0 && strncmp("TYPE", msg_buf, 4)== 0)
     {
       if(strncmp("TYPE I", msg_buf,6) == 0)
       {
@@ -124,29 +126,97 @@ void handle_client_request(int clientFD,struct sockaddr_in client)
       	send_client_msg(clientFD, serverMsg202, strlen(serverMsg202));
       }
     }
-    else if(strncmp("RETR ", msg_buf, 5)== 0)
+    else if(login_flag > 0 && strncmp("RETR ", msg_buf, 5)== 0)
     {
       do_retr(clientFD);
     }
-    else if(strncmp("STOR ", msg_buf, 5)== 0)
+    else if(login_flag > 0 && strncmp("STOR ", msg_buf, 5)== 0)
     {
-      //handle_file(clientFD);
-      send_client_msg(clientFD,serverMsg226, strlen(serverMsg226));
+      do_stor(clientFD);
     }
-    else if(strncmp("SYST", msg_buf, 5) == 0)
+    else if(login_flag > 0 && strncmp("SYST", msg_buf, 4) == 0)
     {
         send_client_msg(clientFD, serverMsg215, strlen(serverMsg215));
     }
-    else if(strncmp("PWD ",msg_buf, 4) == 0)
+    else if(login_flag > 0 && strncmp("PWD", msg_buf, 3) == 0)
     {
-      char  pwd_info[MAX_BUF];
-      char  tmp_dir[MAX_BUF];
-      snprintf(pwd_info, MAX_BUF, "257 \"%s\" is current location.\r\n", getcwd(tmp_dir, MAX_BUF));
+      char pwd_info[MAX_BUF];
+      snprintf(pwd_info, MAX_BUF, "257 \"%s\" is current location.\r\n", pwd);
       send_client_msg(clientFD, pwd_info, strlen(pwd_info));
     }
-    else if(strncmp("ABOR ",msg_buf, 5) == 0)
+    else if(login_flag > 0 && strncmp("MKD ", msg_buf, 4) == 0)
     {
+      char pwd_info[MAX_BUF], dir[MAX_BUF], path[MAX_BUF];
+      int length = strlen(msg_buf);
+      int i;
+      for(i = 4; i < length; i++)
+      {
+        dir[i-4] = msg_buf[i];
+      }
+      dir[i-5] = '\0';
+      strcpy(path, pwd);
+      strcat(path, dir);
+      if(path[strlen(path)-1] != '/') strcat(path, "/");
+      mkdir_r(path);
+      snprintf(pwd_info, MAX_BUF, "257 \"%s\" directory created.\r\n", path);
+      send_client_msg(clientFD, pwd_info, strlen(pwd_info));
+    }
+    else if(login_flag > 0 && strncmp("CWD ", msg_buf, 4) == 0)
+    {
+      char  cwd_info[MAX_BUF], path[MAX_BUF];
+      int i;
+      memset(path, 0, sizeof(path));
+      int length = strlen(msg_buf);
+      for(i = 4; i < length; i++)
+      {
+        path[i-4] = msg_buf[i];
+      }
+      path[i-5] = '\0';
+      if(access(path, 00) ==0) 
+      {
+        strcpy(pwd, path);
+        snprintf(cwd_info, MAX_BUF, "200 directory changed to \"%s\".\r\n", path);
+      }
+      else
+      {
+        snprintf(cwd_info, MAX_BUF, "431 \"%s\" No such directory .\r\n", path);
+      }
+      send_client_msg(clientFD, cwd_info, strlen(cwd_info));
+    }
+    else if(login_flag > 0 && strncmp("CDUP", msg_buf, 4) == 0)
+    {
+      char  pwd_info[MAX_BUF];
+      if(strlen(pwd)==1)
+      {
+        snprintf(pwd_info, MAX_BUF, "431 \"%s\" No parent directory.\r\n", pwd);
+        send_client_msg(clientFD, pwd_info, strlen(pwd_info));
+        break;
+      }
+      if(pwd[strlen(pwd)-1]=='/') pwd[strlen(pwd)] = '\0';
+      char *p = strrchr(pwd,'/');
+      while(*p !='\0')
+      {
+        *p = '\0';
+        p ++;
+      }
+      if(strlen(pwd) == 0)
+      {
+        pwd[0] = '/';
+        pwd[1] = '\0';
+      }
+      snprintf(pwd_info, MAX_BUF, "200 directory changed to \"%s\".\r\n", pwd);
+      send_client_msg(clientFD, pwd_info, strlen(pwd_info));
+    }
+    else if(login_flag > 0 && strncmp("ABOR ",msg_buf, 5) == 0)
+    {
+      send_client_msg(clientFD, serverMsg221, strlen(serverMsg221));
       close(clientFD);
+      close(ftp_data_sock);
+      exit(0);
+    }
+    else
+    {
+      send_client_msg(clientFD, serverMsg202, strlen(serverMsg202));
     }
   }
 }
@@ -305,7 +375,7 @@ int receive_client_msg(int clientFD)
   return 1;
 }
 
-void add_default_user()
+void init()
 {
   FILE *fp;
   char user[MAX_BUF],password[MAX_BUF];
@@ -314,6 +384,8 @@ void add_default_user()
     printf("error in add default user\n");
     exit(1);
   }
+  fscanf(fp, "%s", ftp_path);
+  strcpy(pwd, ftp_path);
   fscanf(fp, "%d", &numOfUser);
   int i;
   for(i=0; i<numOfUser; i++)
@@ -330,37 +402,61 @@ void do_pasv(int clientFD, struct sockaddr_in client)
   int data_transfer_sock = socket(AF_INET, SOCK_STREAM, 0);
   if (data_transfer_sock < 0)
   {
-      printf("error create data socket!\n");
-    return;
+    perror("error create data socket!\n");
+    exit(EXIT_FAILURE);
   }
 
   srand((int)time(0));
   int port = rand()  + 20000;
 
-  memset(&data_transfer_addr, 0, sizeof(struct sockaddr_in));
-  data_transfer_addr.sin_family = AF_INET;
-  data_transfer_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  data_transfer_addr.sin_port = htons(port);    
-
-  if (bind(data_transfer_sock, (struct sockaddr*)&data_transfer_addr, sizeof(struct sockaddr)) < 0)
-  {
-    printf("error bind data socket!\n");
-    return;
-  }
-  listen(data_transfer_sock, 10);
-
   char pasv_msg[MAX_BUF];
   char port_str[8];
   char addr_info_str[30];
+  
+
+  memset(&data_transfer_addr, 0, sizeof(struct sockaddr_in));
+  data_transfer_addr.sin_family = AF_INET;
+  data_transfer_addr.sin_addr.s_addr= INADDR_ANY;
+  data_transfer_addr.sin_port = htons(port);  
   int port1 = ntohs(data_transfer_addr.sin_port) / 256;
-  int port2 = ntohs(data_transfer_addr.sin_port) % 256;
-  long ip = inet_addr(inet_ntoa(client.sin_addr));  //get server's ip
-                                              
+  int port2 = ntohs(data_transfer_addr.sin_port) % 256;  
+
+  int on = 1;
+  if(setsockopt(data_transfer_sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(int)) < 0)
+  {
+     perror("error setsockopt!\n");
+     exit(EXIT_FAILURE);
+  }
+  while (bind(data_transfer_sock, (struct sockaddr*)&data_transfer_addr, sizeof(struct sockaddr_in)) < 0)  //if port is in use
+  {
+    port = rand()  + 20000;
+    data_transfer_addr.sin_port = htons(port);
+    port1 = ntohs(data_transfer_addr.sin_port) / 256;
+    port2 = ntohs(data_transfer_addr.sin_port) % 256;
+  }
+
+  if(listen(data_transfer_sock, 10) < 0)
+  {
+    perror("error listen failed");
+    close(data_transfer_sock);
+    exit(EXIT_FAILURE);
+  }
+
+  long ip = inet_addr(inet_ntoa(client.sin_addr));  //get server's ip                                            
   snprintf(addr_info_str, sizeof(addr_info_str), "%ld,%ld,%ld,%ld,", ip&0xff,ip>>8&0xff,ip>>16&0xff,ip>>24&0xff);
   snprintf(port_str, sizeof(port_str), "%d,%d", port1, port2);
   strcat(addr_info_str, port_str);
   snprintf(pasv_msg, MAX_BUF, "227 Entering Passive Mode (%s).\r\n", addr_info_str);
   send_client_msg(clientFD, pasv_msg, strlen(pasv_msg));
+  
+  connect_mode = 0;
+
+  if(ftp_data_sock > 0)
+  {
+    close(connect_data_sock);
+    close(ftp_data_sock);
+  }
+  ftp_data_sock = data_transfer_sock;
 }
 
 void get_ip(char *buffer,char *ip_address,int *port)
@@ -391,31 +487,259 @@ void get_ip(char *buffer,char *ip_address,int *port)
   
 void do_port(int clientFD)
 {
-  int data_transfer_sock = socket(AF_INET, SOCK_STREAM, 0);
-  struct sockaddr_in client_data_addr;
   char ip[32]={0};
   int  port=0;
   get_ip(msg_buf, ip, &port);
 
-  memset(&client_data_addr, 0, sizeof(struct sockaddr_in));
-  client_data_addr.sin_family = AF_INET;
-  client_data_addr.sin_port = htons(port);
-  int res = inet_pton(AF_INET, ip, &client_data_addr.sin_addr);
-
-  if (res == 0)
+  memset(&data_transfer_addr, 0, sizeof(struct sockaddr_in));
+  data_transfer_addr.sin_family = AF_INET;
+  data_transfer_addr.sin_port = htons(port);
+  if(inet_pton(AF_INET, ip, &data_transfer_addr.sin_addr) == 0)
   {
-    perror("not a valid ipaddress!\n");
-    close(data_transfer_sock);
+    perror("second parameter does not contain valid ipaddress");
     exit(EXIT_FAILURE);
+  }
+
+  connect_mode = 1;
+  if(ftp_data_sock > 0)
+  {
+    close(ftp_data_sock);
+    close(connect_data_sock);
+    ftp_data_sock = -1;
+    connect_data_sock = -1;
+  }
+  send_client_msg(clientFD, PORT_SUCCESS, strlen(PORT_SUCCESS));
+}
+
+
+void do_retr(int clientFD)
+{
+	int i = 0;
+	int length = strlen(msg_buf);
+	char filename[MAX_BUF] = {0};
+	for(i = 5; i < length; i++)
+	{
+		filename[i-5] = msg_buf[i];
+	}
+	filename[i-6] = '\0';
+  long file_size = 0;
+ 	char size[MAX_BUF];
+ 	char msg[MAX_BUF];
+  char path[MAX_BUF];
+  strcpy(path, ftp_path);
+  strcat(path, filename);
+
+
+  // get file size
+  FILE *pFile = fopen(path,"r");
+  if(pFile == NULL)
+  {
+     send_client_msg(clientFD, serverMsg451, strlen(serverMsg451));
+     return;
+  }
+  else
+  {
+    fseek(pFile, 0, SEEK_END);    //move to end
+    file_size = ftell(pFile);     //get file size
+  }
+  fclose(pFile);
+  snprintf(size, sizeof(size), "%s(%ld bytes).\r\n",filename,file_size);
+  strcpy(msg, serverMsgRETR150);
+ 	strcat(msg, size);
+ 	send_client_msg(clientFD, msg, strlen(msg));  //send message to client
+
+
+  //send file
+ 	int read_sock = open(path, O_RDONLY);
+  if(read_sock < 0)
+  {
+    send_client_msg(clientFD, serverMsg451, strlen(serverMsg451));
+    return;
+  }
+ 	char data[MAX_BUF];
+ 	memset(data, 0, sizeof(data));
+
+  if(connect_mode == 0)   //PASV mode
+  {
+    if(ftp_data_sock < 0)
+    {
+      send_client_msg(clientFD, serverMsg425, strlen(serverMsg425));
+      return;
+    }
+    connect_data_sock = accept(ftp_data_sock, NULL, NULL);
+    if(connect_data_sock < 0)
+    {
+      send_client_msg(clientFD, serverMsg425, strlen(serverMsg425));
+      return;
+    }
+    while (read(read_sock, data, MAX_BUF) > 0)
+  	{
+      if (send(connect_data_sock, data, strlen(data), 0) < 0)
+      {
+    		send_client_msg(clientFD, serverMsg426, strlen(serverMsg426));
+        return;
+    	}
+      memset(data, 0, sizeof(data));  
+  	}
+  }
+  else       //PORT mode
+  {
+    connect_data_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (-1 == connect(connect_data_sock, (const struct sockaddr *)&data_transfer_addr, sizeof(struct sockaddr_in)))
+    {
+      send_client_msg(clientFD, serverMsg425, strlen(serverMsg425));
+      return;
+    }
+
+    while (read(read_sock, data, MAX_BUF) > 0)
+    {
+      if (send(connect_data_sock, data, strlen(data), 0) < 0)
+      {
+        send_client_msg(clientFD, serverMsg426, strlen(serverMsg426));
+        return;
+      }
+      memset(data, 0, sizeof(data));  
+    }
+  }
+
+  close(connect_data_sock);
+  close(ftp_data_sock);
+  close(read_sock);
+  ftp_data_sock = -1;
+  connect_data_sock = -1;
+	send_client_msg(clientFD, serverMsg226, strlen(serverMsg226));
+}
+
+
+void do_stor(int clientFD)
+{
+  int i = 0;
+  int length = strlen(msg_buf);
+  char filename[MAX_BUF] = {0};
+  for(i = 5; i < length; i++)
+  {
+    filename[i-5] = msg_buf[i];
+  }
+  filename[i-6] = '\0';
+  char msg[MAX_BUF];
+  char path[MAX_BUF];
+  strcpy(path, ftp_path);
+  strcat(path, filename);
+
+
+  // get file size
+  //snprintf(size, sizeof(size), "%s\r\n", filename);
+  strcpy(msg, serverMsgSTOR150);
+  strcat(msg, filename);
+  strcat(msg, "\r\n");
+  send_client_msg(clientFD, msg, strlen(msg));  //send message to client
+
+
+  //create file
+  mkdir_r(path);
+  umask(0);
+  int write_sock = open(path, (O_RDWR | O_CREAT | O_TRUNC), S_IRWXU | S_IRWXO | S_IRWXG);
+  if(write_sock < 0)
+  {
+    send_client_msg(clientFD, serverMsgSTOR451, strlen(serverMsgSTOR451));
+    return;
+  }
+  char data[MAX_BUF];
+  memset(data, 0, sizeof(data));
+
+
+  //transfer file
+  if(connect_mode == 0)   //PASV mode
+  {
+    if(ftp_data_sock < 0)
+    {
+      send_client_msg(clientFD, serverMsg425, strlen(serverMsg425));
+      return;
+    }
+    connect_data_sock = accept(ftp_data_sock, NULL, NULL);
+    if(connect_data_sock < 0)
+    {
+      send_client_msg(clientFD, serverMsg425, strlen(serverMsg425));
+      return;
+    }
+    while (read(connect_data_sock, data, MAX_BUF) > 0)
+    {
+      if (write(write_sock, data, strlen(data)) < 0)
+      {
+        send_client_msg(clientFD, serverMsg426, strlen(serverMsg426));
+        return;
+      }
+      memset(data, 0, sizeof(data));  
+    }
+  }
+  else       //PORT mode
+  {
+    connect_data_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (-1 == connect(connect_data_sock, (const struct sockaddr *)&data_transfer_addr, sizeof(struct sockaddr_in)))
+    {
+      send_client_msg(clientFD, serverMsg425, strlen(serverMsg425));
+      return;
+    }
+
+    while (read(connect_data_sock, data, MAX_BUF) > 0)
+    {
+      if (write(write_sock, data, strlen(data)) < 0)
+      {
+        send_client_msg(clientFD, serverMsg426, strlen(serverMsg426));
+        return;
+      }
+      memset(data, 0, sizeof(data));  
+    }
+  }
+
+  close(connect_data_sock);
+  close(ftp_data_sock);
+  close(write_sock);
+  ftp_data_sock = -1;
+  connect_data_sock = -1;
+  send_client_msg(clientFD, serverMsg226, strlen(serverMsg226));
+}
+
+/*
+* create multi-level directory
+*/
+int mkdir_r(const char *path)   
+{
+  if (path == NULL) 
+  {
+    return -1;
+  }
+
+  char *temp = malloc(MAX_BUF*sizeof(char));
+
+  int i;
+  for(i = 0; i<strlen(path); i++)
+  {
+    *(temp+i) = *(path+i);
+  }
+
+  char *pos = temp;
+
+
+  if (strncmp(temp, "/", 1) == 0) 
+  {
+    pos += 1;
+  } 
+  else if (strncmp(temp, "./", 2) == 0) 
+  {
+    pos += 2;
   }
   
-  if (-1 == connect(data_transfer_sock, (const struct sockaddr *)&client_data_addr, sizeof(struct sockaddr_in)))
+  for ( ; *pos != '\0'; pos++) 
   {
-    perror("error data socket connect to client failed!\n");
-    close(data_transfer_sock);
-    exit(EXIT_FAILURE);
+    if (*pos == '/') 
+    {
+      *pos = '\0';
+      umask(0);
+      mkdir(temp, S_IRWXU | S_IRWXO | S_IRWXG);
+      *pos = '/';
+    }
   }
-
-  ftp_data_sock = data_transfer_sock;
-  send_client_msg(clientFD, PORT_SUCCESS, strlen(PORT_SUCCESS));
+  free(temp);
+  return 0;
 }
